@@ -50,9 +50,6 @@ func main() {
 	godotenv.Load()
 	stripe.Key = os.Getenv("STRIPE_SECRET_KEY")
 
-	http.HandleFunc("/.well-known/apple-developer-merchantid-domain-association", func(w http.ResponseWriter, r *http.Request) {
-        http.ServeFile(w, r, "apple-developer-merchantid-domain-association")
-    })
 	http.HandleFunc("/payments/create-intent", enableCORS(withCSP(CreatePaymentIntent)))
 	http.HandleFunc("/payments/webhook", enableCORS(withCSP(HandleStripeWebhook)))
 
