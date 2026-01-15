@@ -50,8 +50,9 @@ func main() {
 	godotenv.Load()
 	stripe.Key = os.Getenv("STRIPE_SECRET_KEY")
 
-	http.HandleFunc("/payments/create-intent", enableCORS(CreatePaymentIntent))
-	http.HandleFunc("/payments/webhook", HandleStripeWebhook)
+	http.HandleFunc("/payments/create-intent", enableCORS(withCSP(CreatePaymentIntent)))
+	http.HandleFunc("/payments/webhook", enableCORS(withCSP(HandleStripeWebhook)))
+
 
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -246,6 +247,20 @@ func registrarTickets(rifaID string, numeros []int, userID string) error {
 	}
 	return nil
 }
+
+func withCSP(next http.HandlerFunc) http.HandlerFunc {
+    return func(w http.ResponseWriter, r *http.Request) {
+        w.Header().Set("Content-Security-Policy",
+            "default-src 'self'; "+
+                "script-src 'self' https://js.stripe.com https://m.stripe.network 'unsafe-inline'; "+
+                "style-src 'self' https://js.stripe.com 'unsafe-inline'; "+
+                "frame-src https://js.stripe.com https://m.stripe.network; "+
+                "connect-src 'self' https://api.stripe.com https://m.stripe.network;")
+
+        next.ServeHTTP(w, r)
+    }
+}
+
 
 func toString(v interface{}) string {
 	b, _ := json.Marshal(v)
