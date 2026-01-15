@@ -53,7 +53,6 @@ func main() {
 	http.HandleFunc("/payments/create-intent", enableCORS(withCSP(CreatePaymentIntent)))
 	http.HandleFunc("/payments/webhook", enableCORS(withCSP(HandleStripeWebhook)))
 
-
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
@@ -63,7 +62,7 @@ func main() {
 	log.Fatal(http.ListenAndServe(":"+port, nil))
 }
 
-// 1. Crear el Intento de Pago
+// 1. Crear el Intento de Pago (ACTUALIZADO PARA APPLE PAY)
 func CreatePaymentIntent(w http.ResponseWriter, r *http.Request) {
 	log.Println("--- Nuevo Intento de Pago ---")
 	var req PaymentRequest
@@ -85,6 +84,10 @@ func CreatePaymentIntent(w http.ResponseWriter, r *http.Request) {
 	params := &stripe.PaymentIntentParams{
 		Amount:   stripe.Int64(montoTotal),
 		Currency: stripe.String(string(stripe.CurrencyUSD)),
+		// MODIFICACIÓN CLAVE: Habilitar métodos de pago automáticos para mostrar Apple Pay
+		AutomaticPaymentMethods: &stripe.PaymentIntentAutomaticPaymentMethodsParams{
+			Enabled: stripe.Bool(true),
+		},
 		Metadata: map[string]string{
 			"rifa_id":    req.RifaID,
 			"rifa_title": rifa.Title,
@@ -105,7 +108,7 @@ func CreatePaymentIntent(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"clientSecret": pi.ClientSecret})
 }
 
-// 2. Webhook (El punto donde tienes el problema)
+// 2. Webhook
 func HandleStripeWebhook(w http.ResponseWriter, r *http.Request) {
 	log.Println("--- Webhook Recibido ---")
 
@@ -118,24 +121,15 @@ func HandleStripeWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Logs de verificación de cabeceras
 	endpointSecret := os.Getenv("STRIPE_WEBHOOK_SECRET")
 	signature := r.Header.Get("Stripe-Signature")
 
-	if signature == "" {
-		log.Println("⚠️ Advertencia: No se recibió la cabecera Stripe-Signature")
-	}
-
-	// Construir el evento validando la firma
 	event, err := webhook.ConstructEvent(payload, signature, endpointSecret)
 	if err != nil {
 		log.Printf("❌ Falló la validación del Webhook: %v", err)
-		log.Printf("💡 Tip: Verifica que STRIPE_WEBHOOK_SECRET sea el correcto para producción")
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
-
-	log.Printf("⭐ Evento validado correctamente: %s", event.Type)
 
 	if event.Type == "payment_intent.succeeded" {
 		var pi stripe.PaymentIntent
@@ -146,7 +140,6 @@ func HandleStripeWebhook(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Extraer datos de Metadata
 		rifaID := pi.Metadata["rifa_id"]
 		rifaTitle := pi.Metadata["rifa_title"]
 		userID := pi.Metadata["user_id"]
@@ -154,33 +147,39 @@ func HandleStripeWebhook(w http.ResponseWriter, r *http.Request) {
 		var numeros []int
 		json.Unmarshal([]byte(pi.Metadata["numeros"]), &numeros)
 
-		log.Printf("📦 Procesando tickets para: %s (Rifa: %s)", userEmail, rifaID)
-
-		// 1. Registro en Supabase
 		if err := registrarTickets(rifaID, numeros, userID); err != nil {
 			log.Printf("❌ ERROR al registrar en Supabase: %v", err)
-			// Respondemos 500 para que Stripe reintente el envío del webhook después
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
-		log.Println("✅ Tickets registrados exitosamente en DB")
 
-		// 2. Envío de correo
 		go func() {
-			log.Printf("📧 Iniciando envío de correo a %s...", userEmail)
 			if err := enviarCorreoConfirmacion(userEmail, rifaTitle, numeros); err != nil {
 				log.Printf("⚠️ Error enviando correo: %v", err)
-			} else {
-				log.Printf("📧 Correo enviado con éxito a %s", userEmail)
 			}
 		}()
 	}
 
-	// Si llegamos aquí, todo bien
 	w.WriteHeader(http.StatusOK)
 }
 
-// --- Funciones de Soporte ---
+// --- Middleware CSP (ACTUALIZADO PARA APPLE PAY) ---
+func withCSP(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Security-Policy",
+			"default-src 'self'; "+
+				"script-src 'self' https://js.stripe.com https://m.stripe.network 'unsafe-inline'; "+
+				"style-src 'self' https://js.stripe.com 'unsafe-inline'; "+
+				// Se agregan dominios de Apple para frames
+				"frame-src https://js.stripe.com https://m.stripe.network https://applepay.apple.com; "+
+				// Se agregan gateways de Apple para la conexión
+				"connect-src 'self' https://api.stripe.com https://m.stripe.network https://apple-pay-gateway.apple.com;")
+
+		next.ServeHTTP(w, r)
+	}
+}
+
+// --- Funciones de Soporte (Sin cambios necesarios) ---
 
 func enviarCorreoConfirmacion(destinatario string, rifaNombre string, numeros []int) error {
 	client := resend.NewClient(os.Getenv("RESEND_API_KEY"))
@@ -211,12 +210,16 @@ func getRifa(id string) (*Rifa, error) {
 	req.Header.Set("Authorization", "Bearer "+os.Getenv("SUPABASE_SERVICE_ROLE"))
 
 	resp, err := http.DefaultClient.Do(req)
-	if err != nil || resp.StatusCode != 200 { return nil, errors.New("error supabase") }
+	if err != nil || resp.StatusCode != 200 {
+		return nil, errors.New("error supabase")
+	}
 	defer resp.Body.Close()
 
 	var data []Rifa
 	json.NewDecoder(resp.Body).Decode(&data)
-	if len(data) == 0 { return nil, errors.New("404") }
+	if len(data) == 0 {
+		return nil, errors.New("404")
+	}
 	return &data[0], nil
 }
 
@@ -226,7 +229,7 @@ func registrarTickets(rifaID string, numeros []int, userID string) error {
 	for _, n := range numeros {
 		payload = append(payload, map[string]interface{}{
 			"rifa_id":    rifaID,
-			"number":      n,
+			"number":     n,
 			"profile_id": userID,
 		})
 	}
@@ -238,7 +241,9 @@ func registrarTickets(rifaID string, numeros []int, userID string) error {
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := http.DefaultClient.Do(req)
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 400 {
@@ -247,20 +252,6 @@ func registrarTickets(rifaID string, numeros []int, userID string) error {
 	}
 	return nil
 }
-
-func withCSP(next http.HandlerFunc) http.HandlerFunc {
-    return func(w http.ResponseWriter, r *http.Request) {
-        w.Header().Set("Content-Security-Policy",
-            "default-src 'self'; "+
-                "script-src 'self' https://js.stripe.com https://m.stripe.network 'unsafe-inline'; "+
-                "style-src 'self' https://js.stripe.com 'unsafe-inline'; "+
-                "frame-src https://js.stripe.com https://m.stripe.network; "+
-                "connect-src 'self' https://api.stripe.com https://m.stripe.network;")
-
-        next.ServeHTTP(w, r)
-    }
-}
-
 
 func toString(v interface{}) string {
 	b, _ := json.Marshal(v)
